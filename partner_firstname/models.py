@@ -38,12 +38,18 @@ class ResPartner(models.Model):
         required=False,
         store=True)
 
+    @api.model
+    def _get_computed_name(self, lastname, firstname):
+        """Compute the 'name' field according to splitted data.
+        You can override this method to change the order of lastname and
+        firstname the computed name"""
+        return u" ".join((p for p in (lastname, firstname) if p))
+
     @api.one
     @api.depends("firstname", "lastname")
     def _compute_name(self):
         """Write the 'name' field according to splitted data."""
-        self.name = u" ".join((p for p in (self.lastname,
-                                           self.firstname) if p))
+        self.name = self._get_computed_name(self.lastname, self.firstname)
 
     @api.one
     def _inverse_name_after_cleaning_whitespace(self):
@@ -65,28 +71,33 @@ class ResPartner(models.Model):
         else:
             self._inverse_name()
 
-    @api.one
-    def _inverse_name(self):
+    @api.model
+    def _get_inverse_name(self, name, is_company=False):
         """Try to revert the effect of :meth:`._compute_name`.
 
         - If the partner is a company, save it in the lastname.
         - Otherwise, make a guess.
 
         This method can be easily overriden by other submodules.
+        You can also override this method to change the order of name's
+        attributes
 
         When this method is called, :attr:`~.name` already has unified and
         trimmed whitespace.
         """
         # Company name goes to the lastname
-        if self.is_company or self.name is False:
-            parts = [self.name, False]
-
+        if is_company or not name:
+            parts = [name or False, False]
         # Guess name splitting
         else:
-            parts = self.name.split(" ", 1)
+            parts = name.split(" ", 1)
             while len(parts) < 2:
                 parts.append(False)
+        return parts
 
+    @api.one
+    def _inverse_name(self):
+        parts = self._get_inverse_name(self.name, self.is_company)
         self.lastname, self.firstname = parts
 
     @api.one
@@ -97,10 +108,27 @@ class ResPartner(models.Model):
             raise exceptions.EmptyNamesError(self)
 
     @api.one
+    @api.onchange("firstname", "lastname")
+    def _onchange_subnames(self):
+        """Avoid recursion when the user changes one of these fields.
+
+        This forces to skip the :attr:`~.name` inversion when the user is
+        setting it in a not-inverted way.
+        """
+        # Modify self's context without creating a new Environment.
+        # See https://github.com/odoo/odoo/issues/7472#issuecomment-119503916.
+        self.env.context = self.with_context(skip_onchange=True).env.context
+
+    @api.one
     @api.onchange("name")
     def _onchange_name(self):
         """Ensure :attr:`~.name` is inverted in the UI."""
-        self._inverse_name_after_cleaning_whitespace()
+        if self.env.context.get("skip_onchange"):
+            # Do not skip next onchange
+            self.env.context = (
+                self.with_context(skip_onchange=False).env.context)
+        else:
+            self._inverse_name_after_cleaning_whitespace()
 
     @api.model
     def _install_partner_firstname(self):
